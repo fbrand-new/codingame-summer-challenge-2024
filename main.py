@@ -8,8 +8,19 @@ up = "UP"
 
 HURDLE = {left: 1, down: 2, right: 3, up: 2}
 HURDLE_OBSTACLE = '#'
+VAL_ACT = [left,down,right,up]
 
-# Values are [left,down,right,up]
+# Heuristics:
+# 1. If we are stunned the value of our move should be 0
+# 2. Archery value should increase the more the turn run towards the end.
+# 3. We need AT LEAST one silver medal for each game else our score is ZERO! 
+#   -> Get the silver+gold medals for each game and prioritize the ones in which you suck.
+# 4. Let's try to assign the value to be proportional to the position I am in the game.
+#   - If I am in first position every move has value 1
+#   - If I am in another position then I have to consider what I need to do.
+
+def argmax(iterable):
+    return max(enumerate(iterable), key=lambda x: x[1])[0]
 
 def dist(curr_x,curr_y,target_x,target_y):
     return math.sqrt(math.pow(target_x-curr_x,2)+math.pow(target_y-curr_y,2))
@@ -17,35 +28,71 @@ def dist(curr_x,curr_y,target_x,target_y):
 def debug(msg):
     print(msg, file=sys.stderr, flush=True)
 
-def hurdle_move_value(action,track,pos) -> list:
+def get_scores(score: str):
+    return [int(s) for s in score.split(' ')]
+
+def sum_values(values1,values2):
+    return [x+y for x,y in zip(values1,values2)]
+
+def compute_multipliers(scores):
+    
+    mults = [1,1,1,1]
+
+    for n, i in enumerate(range(1,len(scores),3)):
+        gold_and_silver = sum(scores[i:i+2])
+        total_games = sum(scores[i:i+3])
+        if total_games > 0:
+            mults[n] = (total_games - gold_and_silver)/total_games
+
+    return mults
+
+def apply_multiplier(values: list,multiplier: float):
+    return [v*multiplier for v in values]
+
+def am_i_first(pos:list,my_idx):
+    # Note. This does not make sense for archery
+    return argmax(pos) == my_idx
+
+def hurdle_move_value(track,pos,is_stunned,multiplier,first) -> list:
 
     max_pos = len(track)
-    if pos < max_pos and track[pos+1] == HURDLE_OBSTACLE:
-        return [1,1,1,2] # TODO: account for stun time
-    if pos < max_pos and track[pos+2] == HURDLE_OBSTACLE:
-        return [1,2,2,2]
-    else : # TODO: account for stun time
-        return [1,2,3,2]
 
-def archery_move_value(action,curr_wind,x,y) -> list:
+    debug(f"track: {track}")
+    debug(f"pos: {pos}")
 
-    # TODO: needs refactoring
+    if is_stunned or first:
+        values = [0,0,0,0]
+    elif pos+1 < max_pos and track[pos+1] == HURDLE_OBSTACLE:
+        values = [0,0,0,2] 
+    elif pos+2 < max_pos and track[pos+2] == HURDLE_OBSTACLE:
+        values = [1,0,0,0]
+    elif pos+3 < max_pos and track[pos+3] == HURDLE_OBSTACLE:
+        values = [1,2,0,2]
+    else:
+        values = [1,2,3,2]
+
+    return apply_multiplier(values,multiplier)
+
+def archery_move_value(curr_wind,x,y,total_turns,turn_remaining,multiplier) -> list:
+
     curr_dist = dist(x,y,0,0)
 
-    if action == left:
-        x -= curr_wind
-    elif action == right:
-        x += curr_wind
-    elif action == up:
-        y += curr_wind
-    elif action == down:
-        y -= curr_wind
-    
-    new_dist = dist(x,y,0,0)
+    values = []
 
-    return curr_dist - new_dist
+    f = (total_turns-turn_remaining)/total_turns
 
-def skate_move_value(action,risks):
+    values.append((curr_dist - dist(x-curr_wind,y,0,0))*f)
+    values.append((curr_dist - dist(x,y+curr_wind,0,0))*f)
+    values.append((curr_dist - dist(x+curr_wind,y,0,0))*f)
+    values.append((curr_dist - dist(x,y-curr_wind,0,0))*f)
+
+    return apply_multiplier(values,multiplier)
+
+def skate_move_value(risks,is_stunned,multiplier,first):
+
+    if is_stunned or first:
+        values = [0,0,0,0]
+
     value_dict = {0:1,1:2,2:8/5,3:7/3}
     
     left_idx = risks.index('L')
@@ -53,62 +100,110 @@ def skate_move_value(action,risks):
     up_idx = risks.index('U')
     down_idx = risks.index('D')
 
-    return [value_dict[left_idx],
+    values = [value_dict[left_idx],
             value_dict[down_idx],
             value_dict[right_idx],
             value_dict[up_idx]]
 
-def diving_move_value(goal,curr_combo):
-    if goal == 'L':
-        return [curr_combo+1,1,1,1]
-    if goal == '':
-        return [curr_combo+1,1,1,1]
+    return apply_multiplier(values,multiplier)
 
-def best_move(gpu,pos):
-    
-    max_pos = len(gpu) - 1
-    if pos < max_pos and gpu[pos+1] == '#':
-        act = up
-    elif pos+2 < max_pos and gpu[pos+1] == '.' and gpu[pos+2] == '#':
-        act = left
-    elif pos+3 < max_pos and gpu[pos+1] == '.' and gpu[pos+2] == '.' and gpu[pos+3] == '#':
-        act = down
-    else:
-        act = right
+def diving_move_value(goal,curr_combo,multiplier,first):
 
-    return act
+    if first:
+        values = [0,0,0,0]
+    elif goal == 'L':
+        values = [curr_combo+1,1,1,1]
+    elif goal == 'D':
+        values = [1,curr_combo+1,1,1]
+    elif goal == 'R':
+        values = [1,1,curr_combo+1,1]
+    elif goal == 'U':
+        values = [1,1,1,curr_combo+1]
+    else :
+        values = [0,0,0,0]
 
-def max_policy(actions):
-    return max(actions)
+    return apply_multiplier(values,multiplier)
 
 player_idx = int(input())
+regs = [0,0,0,0,0,0,0]
 nb_games = int(input())
 
 act = None
 
+total_archery_rounds = 0
 # game loop
 while True:
+
+    values = [0,0,0,0]
 
     actions = []
 
     for i in range(3):
         score_info = input()
+        if i == player_idx:
+            scores = get_scores(score_info)
+            multipliers = compute_multipliers(scores)
+
     for i in range(nb_games):
         inputs = input().split()
         gpu = inputs[0]
-        reg_0 = int(inputs[1])
-        reg_1 = int(inputs[2])
-        reg_2 = int(inputs[3])
-        reg_3 = int(inputs[4])
-        reg_4 = int(inputs[5])
-        reg_5 = int(inputs[6])
-        reg_6 = int(inputs[7])
+        regs[0] = int(inputs[1])
+        regs[1] = int(inputs[2])
+        regs[2] = int(inputs[3])
+        regs[3] = int(inputs[4])
+        regs[4] = int(inputs[5])
+        regs[5] = int(inputs[6])
+        regs[6] = int(inputs[7])
 
-        # Consider the only the next possible moves and chose which one is best for 
-        # the most races
-        act = best_move(gpu,reg_0)
-        actions.append(act)
+        if gpu == "GAME_OVER":
+            if i == 1:
+                total_archery_rounds = 0
+            continue
 
-    act = max_policy(actions)
+        if i == 0:
+            is_stunned = regs[player_idx+3] > 0
+            am_first = am_i_first(regs[0:3],player_idx)
+            my_pos = regs[player_idx]
+            values = sum_values(values,hurdle_move_value(gpu,my_pos,is_stunned,multipliers[i],am_first))
+            debug(f"hurdle values: {values}")
+        if i == 1:
+            if total_archery_rounds == 0:
+                total_archery_rounds = len(gpu)
+                remaining_rounds = len(gpu)
+            else:
+                remaining_rounds = len(gpu)
+            values = sum_values(values,
+                                archery_move_value(
+                                    int(gpu[0]),regs[player_idx*2],regs[player_idx*2+1],
+                                    total_archery_rounds,
+                                    remaining_rounds,
+                                    multipliers[i]))
+            debug(f"archery values: {values}")
+        if i == 2:
+            is_stunned = regs[player_idx+3] < 0
+            am_first = am_i_first(regs[0:3],player_idx)
+            values = sum_values(values,skate_move_value(gpu,is_stunned,multipliers[i],am_first))
+            debug(f"skating values: {values}")
+        if i == 3:
+            am_first = am_i_first(regs[0:3],player_idx)
+            values = sum_values(values,diving_move_value(gpu[0],regs[player_idx+3],multipliers[i],am_first))
+            debug(f"diving values: {values}")
 
+    debug(values)
+    act = VAL_ACT[argmax(values)]
     print(act)
+
+
+# def best_move(gpu,pos):
+    
+#     max_pos = len(gpu) - 1
+#     if pos < max_pos and gpu[pos+1] == '#':
+#         act = up
+#     elif pos+2 < max_pos and gpu[pos+1] == '.' and gpu[pos+2] == '#':
+#         act = left
+#     elif pos+3 < max_pos and gpu[pos+1] == '.' and gpu[pos+2] == '.' and gpu[pos+3] == '#':
+#         act = down
+#     else:
+#         act = right    
+    
+#     return act

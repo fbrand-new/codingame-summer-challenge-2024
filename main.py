@@ -18,9 +18,17 @@ VAL_ACT = [left,down,right,up]
 # 4. Let's try to assign the value to be proportional to the position I am in the game.
 #   - If I am in first position every move has value 1
 #   - If I am in another position then I have to consider what I need to do.
+# 5. In archery if turns remaining is more than 6, value is 0
+# 6. In diving, if I am sure of winning, values should be 0
+# 7. No matter what, we strive not to get dead last.
+# 8. Or actually keep pushing!
+# 9. But If this round it's too late to catch up then we should give up.
 
 def argmax(iterable):
     return max(enumerate(iterable), key=lambda x: x[1])[0]
+
+def argmin(iterable):
+    return min(enumerate(iterable), key=lambda x: x[1])[0]
 
 def dist(curr_x,curr_y,target_x,target_y):
     return math.sqrt(math.pow(target_x-curr_x,2)+math.pow(target_y-curr_y,2))
@@ -49,18 +57,24 @@ def compute_multipliers(scores):
 def apply_multiplier(values: list,multiplier: float):
     return [v*multiplier for v in values]
 
+def am_i_last(pos:list,my_idx):
+    return argmin(pos) == my_idx
+
 def am_i_first(pos:list,my_idx):
     # Note. This does not make sense for archery
     return argmax(pos) == my_idx
 
-def hurdle_move_value(track,pos,is_stunned,multiplier,first) -> list:
+def second_player(points:dict):
+    return sorted(points, key=lambda x: points[x])[1]
+
+def hurdle_move_value(track,pos,is_stunned,multiplier,first,last) -> list:
 
     max_pos = len(track)
 
     debug(f"track: {track}")
     debug(f"pos: {pos}")
 
-    if is_stunned or first:
+    if is_stunned:
         values = [0,0,0,0]
     elif pos+1 < max_pos and track[pos+1] == HURDLE_OBSTACLE:
         values = [0,0,0,2] 
@@ -71,6 +85,9 @@ def hurdle_move_value(track,pos,is_stunned,multiplier,first) -> list:
     else:
         values = [1,2,3,2]
 
+    # if last:
+    #     multiplier *= 1.5 # We do not want to be last
+
     return apply_multiplier(values,multiplier)
 
 def archery_move_value(curr_wind,x,y,total_turns,turn_remaining,multiplier) -> list:
@@ -79,7 +96,10 @@ def archery_move_value(curr_wind,x,y,total_turns,turn_remaining,multiplier) -> l
 
     values = []
 
-    f = (total_turns-turn_remaining)/total_turns
+    if turn_remaining > 8:
+        return [0,0,0,0]
+    
+    f = ((total_turns-turn_remaining)/total_turns)**2
 
     values.append((curr_dist - dist(x-curr_wind,y,0,0))*f)
     values.append((curr_dist - dist(x,y+curr_wind,0,0))*f)
@@ -88,9 +108,9 @@ def archery_move_value(curr_wind,x,y,total_turns,turn_remaining,multiplier) -> l
 
     return apply_multiplier(values,multiplier)
 
-def skate_move_value(risks,is_stunned,multiplier,first):
+def skate_move_value(risks,is_stunned,multiplier,first,last):
 
-    if is_stunned or first:
+    if is_stunned:
         values = [0,0,0,0]
 
     value_dict = {0:1,1:2,2:8/5,3:7/3}
@@ -105,12 +125,19 @@ def skate_move_value(risks,is_stunned,multiplier,first):
             value_dict[right_idx],
             value_dict[up_idx]]
 
+    # if last:
+    #     multiplier *= 2
+
     return apply_multiplier(values,multiplier)
 
-def diving_move_value(goal,curr_combo,multiplier,first):
+def diving_move_value(goal,multiplier,first,curr_combo,second_combo,my_points,second_points,remaining_turns):
 
-    if first:
+    max_possible_second_points = second_points + sum(range(second_combo,second_combo+remaining_turns))
+    debug(f"max_possible_second_points: {max_possible_second_points}")
+    if max_possible_second_points < my_points:
         values = [0,0,0,0]
+    # elif first:
+    #     values = [0,0,0,0]
     elif goal == 'L':
         values = [curr_combo+1,1,1,1]
     elif goal == 'D':
@@ -163,8 +190,9 @@ while True:
         if i == 0:
             is_stunned = regs[player_idx+3] > 0
             am_first = am_i_first(regs[0:3],player_idx)
+            am_last = am_i_last(regs[0:3],player_idx)
             my_pos = regs[player_idx]
-            values = sum_values(values,hurdle_move_value(gpu,my_pos,is_stunned,multipliers[i],am_first))
+            values = sum_values(values,hurdle_move_value(gpu,my_pos,is_stunned,multipliers[i],am_first,am_last))
             debug(f"hurdle values: {values}")
         if i == 1:
             if total_archery_rounds == 0:
@@ -182,11 +210,20 @@ while True:
         if i == 2:
             is_stunned = regs[player_idx+3] < 0
             am_first = am_i_first(regs[0:3],player_idx)
-            values = sum_values(values,skate_move_value(gpu,is_stunned,multipliers[i],am_first))
+            am_last = am_i_last(regs[0:3],player_idx)
+            values = sum_values(values,skate_move_value(gpu,is_stunned,multipliers[i],am_first,am_last))
             debug(f"skating values: {values}")
         if i == 3:
             am_first = am_i_first(regs[0:3],player_idx)
-            values = sum_values(values,diving_move_value(gpu[0],regs[player_idx+3],multipliers[i],am_first))
+            points = {0:regs[0],1:regs[1],2:regs[2]}
+            second_player_idx = second_player(points)
+            values = sum_values(values,diving_move_value(
+                gpu[0],multipliers[i],am_first,
+                regs[player_idx+3],
+                regs[second_player_idx+3],
+                regs[player_idx],
+                regs[second_player_idx],
+                len(gpu)))
             debug(f"diving values: {values}")
 
     debug(values)
